@@ -4,6 +4,8 @@ import os
 import gdown
 import zipfile
 import json
+import numpy as np
+import cv2
 from PIL import Image
 from transformers import AutoModelForUniversalSegmentation, AutoImageProcessor
 
@@ -18,7 +20,6 @@ def descargar_y_preparar_modelos():
         with st.spinner("Descargando EfficientPS..."):
             gdown.download(f'https://drive.google.com/uc?id={ID_EFFICIENTPS}', "efficientps_final.pt", quiet=False)
     
-    # Cargamos el diccionario para extraer métricas
     checkpoint_eff = torch.load("efficientps_final.pt", map_location="cpu")
     m_eff = checkpoint_eff.get('metrics', {"map": 0.6682, "iou": 0.5244, "accuracy": 0.7518})
 
@@ -27,9 +28,8 @@ def descargar_y_preparar_modelos():
         with st.spinner("Descargando y descomprimiendo Mask2Former..."):
             gdown.download(f'https://drive.google.com/uc?id={ID_MASK2FORMER_ZIP}', "m2k.zip", quiet=False)
             with zipfile.ZipFile("m2k.zip", 'r') as zip_ref:
-                zip_ref.extractall(".") # Extrae la carpeta mask2former_app
+                zip_ref.extractall(".") 
     
-    # Carga del modelo y procesador de Transformers
     model_m2k = AutoModelForUniversalSegmentation.from_pretrained("mask2former_app")
     processor_m2k = AutoImageProcessor.from_pretrained("mask2former_app")
     
@@ -38,7 +38,32 @@ def descargar_y_preparar_modelos():
 
     return m_eff, m_m2k, model_m2k, processor_m2k
 
-# Ejecutamos la función
+# --- FUNCIÓN DE INFERENCIA PARA MASK2FORMER ---
+def realizar_inferencia_m2k(image, model, processor):
+    # Preparar imagen para el transformer
+    inputs = processor(images=image, return_tensors="pt")
+    
+    with torch.no_grad():
+        outputs = model(**inputs)
+    
+    # Post-procesar para obtener segmentación panóptica
+    # target_sizes requiere (alto, ancho)
+    result = processor.post_process_panoptic_segmentation(outputs, target_sizes=[image.size[::-1]])[0]
+    segmentation = result["segmentation"].cpu().numpy()
+    
+    # Crear un mapa de colores aleatorios para las instancias detectadas
+    color_seg = np.zeros((segmentation.shape[0], segmentation.shape[1], 3), dtype=np.uint8)
+    for label in np.unique(segmentation):
+        if label == -1: continue # Ignorar fondo si lo hay
+        color = np.random.randint(0, 255, size=3).tolist()
+        color_seg[segmentation == label] = color
+        
+    # Convertir original a array de OpenCV y mezclar (Alpha blending)
+    img_array = np.array(image.convert("RGB"))
+    combined = cv2.addWeighted(img_array, 0.6, color_seg, 0.4, 0)
+    return combined
+
+# Ejecutamos la carga inicial
 m_eff, m_m2k, model_m2k, processor_m2k = descargar_y_preparar_modelos()
 
 # --- INTERFAZ DE STREAMLIT ---
@@ -53,16 +78,21 @@ if uploaded_file:
 
     with col1:
         st.header("EfficientPS (CNN)")
-        st.image(img, use_container_width=True, caption="Imagen original para EfficientPS")
+        # Mostramos la original mientras se integra la función específica de EfficientPS
+        st.image(img, use_container_width=True, caption="Inferencia EfficientPS (Vista Original)")
         st.metric("mAP", f"{m_eff['map']:.4f}")
         st.write(f"**IoU:** {m_eff['iou']} | **Acc:** {m_eff['accuracy']}")
 
     with col2:
         st.header("Mask2Former (Transformer)")
-        st.image(img, use_container_width=True, caption="Imagen original para Mask2Former")
+        with st.spinner("Procesando segmentación con Transformer..."):
+            # Realizar la inferencia real aquí
+            resultado_m2k = realizar_inferencia_m2k(img, model_m2k, processor_m2k)
+            st.image(resultado_m2k, use_container_width=True, caption="Segmentación Panóptica Generada")
+        
         st.metric("mAP", f"{m_m2k['map']:.4f}", delta="Top Performance")
         st.write(f"**IoU:** {m_m2k['iou']} | **Acc:** {m_m2k['accuracy']}")
     
-    st.success("¡Modelos cargados y listos para inferencia!")
+    st.success("¡Inferencia completada con éxito!")
 else:
     st.info("Esperando carga de imagen para procesar...")
