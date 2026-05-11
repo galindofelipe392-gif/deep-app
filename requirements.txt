@@ -6,3 +6,4 @@ Pillow
 numpy
 matplotlib
 opencv-python-headless
+gdown
