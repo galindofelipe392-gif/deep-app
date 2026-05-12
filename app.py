@@ -1,90 +1,117 @@
 import streamlit as st
 import torch
+import os
+import gdown
+import zipfile
+import json
 import numpy as np
 import cv2
-import gdown
-import os
+import torchvision.transforms as T
 from PIL import Image
 from transformers import AutoModelForUniversalSegmentation, AutoImageProcessor
 
-# 1. CONFIGURACIÓN DE IDENTIFICADORES
+# 1. RECURSOS
 ID_EFFICIENTPS = "1u4Of7RwrI-EAyszZqSQY5wv_cbZ1uJsN"
-REPO_M2F = "facebook/mask2former-swin-tiny-cityscapes"
-
-# Forzamos a que Transformers guarde los modelos en una ruta con permisos
-os.environ["TRANSFORMERS_CACHE"] = "./cache/"
-os.environ["HF_HOME"] = "./cache/"
+ID_MASK2FORMER_ZIP = "1CR2Io5CtJPI9DBJbupRSNp_HxsRttlnM"
 
 @st.cache_resource
-def load_models():
+def cargar_modelos_panopticos():
     # --- EfficientPS ---
     if not os.path.exists("efficientps_final.pt"):
         gdown.download(f'https://drive.google.com/uc?id={ID_EFFICIENTPS}', "efficientps_final.pt", quiet=False)
     
-    # Intentamos cargar el checkpoint (CPU)
-    model_eff = torch.load("efficientps_final.pt", map_location="cpu")
-    if isinstance(model_eff, dict):
-        model_eff = model_eff.get('model', model_eff)
-
-    # --- Mask2Former con Reintentos de Red ---
-    try:
-        # Intentamos la carga estándar
-        proc = AutoImageProcessor.from_pretrained(REPO_M2F, trust_remote_code=True)
-        model = AutoModelForUniversalSegmentation.from_pretrained(REPO_M2F)
-    except Exception:
-        # Si falla por red (OSError), intentamos una carga más ligera
-        st.warning("Cargando componentes de respaldo...")
-        proc = AutoImageProcessor.from_pretrained(REPO_M2F, local_files_only=False, resume_download=True)
-        model = AutoModelForUniversalSegmentation.from_pretrained(REPO_M2F, resume_download=True)
+    checkpoint = torch.load("efficientps_final.pt", map_location="cpu")
     
-    return model_eff, model, proc
+    # CORRECCIÓN CRÍTICA: Extraer el modelo si el .pt es un diccionario
+    if isinstance(checkpoint, dict):
+        # Intentamos obtener la llave donde suele guardarse el modelo
+        model_eff = checkpoint.get('model', checkpoint.get('state_dict', checkpoint))
+    else:
+        model_eff = checkpoint
 
-# 2. PROCESAMIENTO VISUAL
-def get_panoptic_overlay(image, mask):
-    img_np = np.array(image.convert("RGB"))
+    # Si model_eff sigue siendo un state_dict (solo pesos), necesitamos la clase original.
+    # Por ahora, asumiremos que el .pt incluye la estructura (objeto completo).
+    if hasattr(model_eff, 'eval'):
+        model_eff.eval()
+    
+    # --- Mask2Former ---
+    if not os.path.exists("mask2former_app"):
+        gdown.download(f'https://drive.google.com/uc?id={ID_MASK2FORMER_ZIP}', "m2k.zip", quiet=False)
+        with zipfile.ZipFile("m2k.zip", 'r') as z: z.extractall(".") 
+    
+    model_m2k = AutoModelForUniversalSegmentation.from_pretrained("mask2former_app")
+    processor_m2k = AutoImageProcessor.from_pretrained("mask2former_app")
+    
+    return model_eff, model_m2k, processor_m2k
+
+# --- INICIALIZACIÓN ---
+model_eff, model_m2k, processor_m2k = cargar_modelos_panopticos()
+
+def aplicar_colores_panopticos(image, mask):
     h, w = mask.shape
-    overlay = np.zeros((h, w, 3), dtype=np.uint8)
+    color_map = np.zeros((h, w, 3), dtype=np.uint8)
+    unique_ids = np.unique(mask)
     
-    for obj_id in np.unique(mask):
-        if obj_id == 0: continue
+    for obj_id in unique_ids:
+        if obj_id == 0: continue 
         np.random.seed(int(obj_id))
-        overlay[mask == obj_id] = np.random.randint(0, 255, size=3).tolist()
+        color = np.random.randint(0, 255, size=3).tolist()
+        color_map[mask == obj_id] = color
+        
+    img_rgb = np.array(image.convert("RGB"))
+    img_rgb = cv2.resize(img_rgb, (w, h))
+    return cv2.addWeighted(img_rgb, 0.5, color_map, 0.5, 0)
+
+# --- INFERENCIA EFFICIENTPS ---
+def inferir_eff_panoptico(image, model):
+    transform = T.Compose([
+        T.Resize((512, 512)),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    input_tensor = transform(image).unsqueeze(0)
     
-    overlay = cv2.resize(overlay, (img_np.shape[1], img_np.shape[0]), interpolation=cv2.INTER_NEAREST)
-    return cv2.addWeighted(img_np, 0.5, overlay, 0.5, 0)
+    with torch.no_grad():
+        # Verificamos si el modelo es llamable (callable)
+        if callable(model):
+            output = model(input_tensor)
+            if isinstance(output, dict):
+                output = output.get('out', list(output.values())[0])
+            mask = torch.argmax(output.squeeze(), dim=0).cpu().numpy()
+        else:
+            # Si el modelo no cargó correctamente la estructura, simulamos con bordes
+            st.error("El archivo .pt no contiene la estructura del modelo, solo los pesos.")
+            gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
+            mask = (gray // 64).astype(np.uint8)
+
+    mask_resized = cv2.resize(mask, (image.size[0], image.size[1]), interpolation=cv2.INTER_NEAREST)
+    return aplicar_colores_panopticos(image, mask_resized)
+
+# --- INFERENCIA MASK2FORMER ---
+def inferir_m2k_panoptico(image, model, processor):
+    inputs = processor(images=image, return_tensors="pt")
+    with torch.no_grad():
+        outputs = model(**inputs)
+    
+    result = processor.post_process_panoptic_segmentation(outputs, target_sizes=[image.size[::-1]])[0]
+    panoptic_mask = result["segmentation"].cpu().numpy()
+    return aplicar_colores_panopticos(image, panoptic_mask)
 
 # --- INTERFAZ ---
-st.set_page_config(page_title="Monitor SCADA", layout="wide")
-st.title("🛰️ Validación Cartográfica SCADA")
+st.title("🛰️ Deep Computer: Panóptica Real")
+up = st.sidebar.file_uploader("Cargar Imagen Aérea", type=["jpg", "png"])
 
-# Cargamos modelos al inicio
-try:
-    m_eff, m_m2f, p_m2f = load_models()
-    st.sidebar.success("Modelos listos ✅")
-except Exception as e:
-    st.error(f"Error de sistema: {e}. Por favor, reinicia la App en el panel de Streamlit.")
-    st.stop()
-
-uploaded = st.sidebar.file_uploader("Subir imagen aérea", type=["jpg", "png", "jpeg"])
-
-if uploaded:
-    img = Image.open(uploaded)
-    c1, c2 = st.columns(2)
+if up:
+    img = Image.open(up)
+    col1, col2 = st.columns(2)
     
-    with c1:
+    with col1:
         st.header("EfficientPS (CNN)")
-        # Lógica basada en tu cuaderno para visualización rápida
-        gray = np.array(img.convert("L"))
-        mask_eff = cv2.medianBlur((gray // 60).astype(np.uint8), 5)
-        st.image(get_panoptic_overlay(img, mask_eff), use_container_width=True)
-        st.metric("mAP", "0.6682")
+        # Llamada segura
+        res_eff = inferir_eff_panoptico(img, model_eff)
+        st.image(res_eff, use_container_width=True)
 
-    with c2:
+    with col2:
         st.header("Mask2Former (Transformer)")
-        inputs = p_m2f(images=img, return_tensors="pt")
-        with torch.no_grad():
-            outputs = m_m2f(**inputs)
-        
-        result = p_m2f.post_process_panoptic_segmentation(outputs, target_sizes=[img.size[::-1]])[0]
-        st.image(get_panoptic_overlay(img, result["segmentation"].cpu().numpy()), use_container_width=True)
-        st.metric("mAP", "0.7386")
+        res_m2k = inferir_m2k_panoptico(img, model_m2k, processor_m2k)
+        st.image(res_m2k, use_container_width=True)
