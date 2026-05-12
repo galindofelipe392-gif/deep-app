@@ -67,8 +67,8 @@ st.markdown("""
     .header-box { background: linear-gradient(90deg, #1a1a2e, #16213e); padding: 30px; border-radius: 15px; color: white; text-align: center; border-bottom: 4px solid #e94560; }
     </style>
     <div class="header-box">
-        <h1>🧠 Deep Computer: Laboratorio de Visión Artificial</h1>
-        <p>Segmentación Panóptica con Arquitecturas CNN y Transformer</p>
+        <h1>🧠 Deep Computer:Taller CARTOGRAFÍA AUTOMATIZADA</h1>
+        <p>segmentación panóptica: mask2former y EfficientPS</p>
     </div><br>
 """, unsafe_allow_html=True)
 
