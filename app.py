@@ -79,7 +79,7 @@ except Exception as e:
     st.error(f"Fallo en la carga: {e}")
     st.stop()
 
-archivo = st.sidebar.file_uploader("Entrada de Sensor (Imagen)", type=["jpg", "png", "jpeg"])
+archivo = st.sidebar.file_uploader("Cargar Imagen)", type=["jpg", "png", "jpeg"])
 
 if archivo:
     # Pre-procesamiento: Normalización RGB
@@ -91,7 +91,7 @@ if archivo:
     st.image(img_pil, caption="Entrada original sin procesar", use_container_width=True)
     st.divider()
 
-    if st.button("🚀 Iniciar Inferencia Profunda"):
+    if st.button("🚀 Iniciar modelos"):
         with st.spinner("Procesando Tensores..."):
             
             # Inferencia M2F
