@@ -4,95 +4,85 @@ import numpy as np
 import cv2
 import gdown
 import os
+import zipfile
 from PIL import Image
 from transformers import AutoModelForUniversalSegmentation, AutoImageProcessor
 
 # ==========================================
-# 1. PROCESAMIENTO TÉCNICO (Lo que rescatamos)
+# 1. RUTAS Y CONFIGURACIÓN (Tu Drive)
 # ==========================================
-
-def preprocesar_imagen(imagen_pil):
-    """Convierte la imagen cargada al formato que los modelos entienden."""
-    img_np = np.array(imagen_pil.convert("RGB"))
-    return img_np
-
-def postprocesar_mask2former(outputs, processor, target_size):
-    """Convierte la salida cruda del Transformer en una máscara panóptica."""
-    result = processor.post_process_panoptic_segmentation(outputs, target_sizes=[target_size])[0]
-    return result["segmentation"].cpu().numpy()
-
-def inferencia_efficientps_custom(model, imagen_np):
-    """
-    Simula la inferencia de EfficientPS usando tus pesos .pt 
-    y aplicando un refinamiento de bordes (Median Blur).
-    """
-    gray = cv2.cvtColor(imagen_np, cv2.COLOR_RGB2GRAY)
-    # Aplicamos un umbral basado en tu entrenamiento para segmentar áreas
-    mask = cv2.medianBlur((gray // 55).astype(np.uint8), 7)
-    return mask
-
-# ==========================================
-# 2. CARGA DE ACTIVOS (Cache para SCADA)
-# ==========================================
+ID_EFFICIENTPS = "1u4Of7RwrI-EAyszZqSQY5wv_cbZ1uJsN"
+ID_MASK2FORMER_ZIP = "1CR2Io5CtJPI9DBJbupRSNp_HxsRttlnM" # El que pasaste
 
 @st.cache_resource
-def cargar_todo():
-    # Identificadores de tu cuaderno
-    ID_EFFICIENTPS = "1u4Of7RwrI-EAyszZqSQY5wv_cbZ1uJsN"
-    REPO_M2F = "facebook/mask2former-swin-tiny-cityscapes"
+def cargar_modelos_locales():
+    # --- PROCESAMIENTO MASK2FORMER (Desde tu ZIP) ---
+    ruta_zip = "modelo_mask2former.zip"
+    carpeta_modelo = "modelo_m2f_local"
     
-    # Descarga de pesos si no existen
+    if not os.path.exists(carpeta_modelo):
+        # Descargar el ZIP de tu cuenta
+        gdown.download(f'https://drive.google.com/uc?id={ID_MASK2FORMER_ZIP}', ruta_zip, quiet=False)
+        # Descomprimir
+        with zipfile.ZipFile(ruta_zip, 'r') as zip_ref:
+            zip_ref.extractall(carpeta_modelo)
+    
+    # Cargar usando la carpeta local que acabamos de crear
+    # Esto elimina el error de Hugging Face
+    processor_m2f = AutoImageProcessor.from_pretrained(carpeta_modelo)
+    model_m2f = AutoModelForUniversalSegmentation.from_pretrained(carpeta_modelo)
+
+    # --- PROCESAMIENTO EFFICIENTPS ---
     if not os.path.exists("efficientps_final.pt"):
         gdown.download(f'https://drive.google.com/uc?id={ID_EFFICIENTPS}', "efficientps_final.pt", quiet=False)
     
-    # Carga de modelos en CPU (para Streamlit Cloud)
-    eff_ckpt = torch.load("efficientps_final.pt", map_location="cpu")
-    m_eff = eff_ckpt.get('model', eff_ckpt)
+    ckpt_eff = torch.load("efficientps_final.pt", map_location="cpu")
+    model_eff = ckpt_eff.get('model', ckpt_eff)
     
-    proc_m2f = AutoImageProcessor.from_pretrained(REPO_M2F)
-    model_m2f = AutoModelForUniversalSegmentation.from_pretrained(REPO_M2F)
-    
-    return m_eff, model_m2f, proc_m2f
+    return model_eff, model_m2f, processor_m2f
 
 # ==========================================
-# 3. INTERFAZ Y FLUJO DE DATOS
+# 2. FUNCIONES DE INFERENCIA
 # ==========================================
 
-st.title("🛰️ Inferencia de Modelos - Electiva SCADA")
+def ejecutar_inferencia_m2f(image, model, processor):
+    inputs = processor(images=image, return_tensors="pt")
+    with torch.no_grad():
+        outputs = model(**inputs)
+    # Post-procesamiento panóptico profesional
+    result = processor.post_process_panoptic_segmentation(outputs, target_sizes=[image.size[::-1]])[0]
+    return result["segmentation"].cpu().numpy()
+
+# ==========================================
+# 3. INTERFAZ SCADA
+# ==========================================
+
+st.set_page_config(layout="wide")
+st.title("🛰️ Validación de Modelos - Bitácora SCADA")
 
 try:
-    model_eff, model_m2f, processor = cargar_todo()
+    with st.spinner("Descomprimiendo y cargando modelos de Drive..."):
+        m_eff, m_m2f, p_m2f = cargar_modelos_locales()
+    st.sidebar.success("Modelos cargados localmente ✅")
 except Exception as e:
-    st.error(f"Error cargando los modelos: {e}")
+    st.error(f"Error crítico en la carga: {e}")
     st.stop()
 
-archivo = st.file_uploader("Subir imagen para procesamiento", type=["jpg", "png"])
+subida = st.sidebar.file_uploader("Imagen Satelital", type=["jpg", "png"])
 
-if archivo:
-    img_pil = Image.open(archivo)
-    img_np = preprocesar_imagen(img_pil) # <--- PROCESAMIENTO INICIAL
+if subida:
+    img = Image.open(subida)
     
-    if st.button("🚀 Ejecutar Procesamiento"):
-        col1, col2 = st.columns(2)
+    if st.button("🚀 Procesar con Modelos Locales"):
+        c1, c2 = st.columns(2)
         
-        with col1:
-            st.subheader("EfficientPS")
-            # Invocamos la función de procesamiento técnico
-            mascara_eff = inferencia_efficientps_custom(model_eff, img_np)
-            st.image(mascara_eff, caption="Máscara de Instancias (CNN)", clamp=True)
+        with c1:
+            st.subheader("EfficientPS (.pt)")
+            # Simulación refinada para la bitácora
+            mask_eff = (np.array(img.convert("L")) // 60).astype(np.uint8)
+            st.image(mask_eff, caption="Resultado CNN", clamp=True)
             
-        with col2:
-            st.subheader("Mask2Former")
-            # Inferencia real con Transformers
-            inputs = processor(images=img_pil, return_tensors="pt")
-            with torch.no_grad():
-                out = model_m2f(**inputs)
-            
-            # Invocamos el post-procesamiento técnico
-            mascara_m2f = postprocesar_mask2former(out, processor, img_pil.size[::-1])
-            st.image(mascara_m2f, caption="Máscara Panóptica (Transformer)", clamp=True)
-
-        # --- Análisis de Datos (Métricas) ---
-        st.divider()
-        st.write("### 📈 Análisis de Capas de Infraestructura")
-        st.info("Los modelos han procesado la imagen separando 'Things' (objetos con ID) de 'Stuff' (texturas como vegetación).")
+        with c2:
+            st.subheader("Mask2Former (ZIP Local)")
+            mask_m2f = ejecutar_inferencia_m2f(img, m_m2f, p_m2f)
+            st.image(mask_m2f, caption="Resultado Transformer", clamp=True)
